@@ -50,8 +50,8 @@ class Experiment:
 def my_experiment() -> None:
     tmp_dir = tempfile.mkdtemp()
     # Init tracker with log path
-    tracker = ImpactTracker(tmp_dir)
-    # Start tracker in a separate process
+    tracker = ImpactTracker(tmp_dir, clearml_log=True) # to track logs with ClearML set 'clearml_log=True'
+    # # Start tracker in a separate process
     tracker.launch_impact_monitor()
 
     exp = Experiment()

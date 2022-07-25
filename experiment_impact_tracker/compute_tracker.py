@@ -73,6 +73,7 @@ def read_latest_stats(log_dir):
     return None
 
 
+
 def _sample_and_log_power(log_dir, initial_info, logger=None):
     """
     Iterates over compatible metrics and logs the relevant information.
@@ -126,16 +127,18 @@ def _sample_and_log_power(log_dir, initial_info, logger=None):
     header_information["process_ids"] = process_ids
     # once we have gotten all the required info through routing calls for all headers, we log it
     log_path = safe_file_path(os.path.join(log_dir, DATAPATH))
+
     try:
         write_json_data_to_file(log_path, header_information)
     except:
         logger.error(header_information)
         raise
+
     return header_information
 
 
 @processify
-def launch_power_monitor(queue, log_dir, initial_info, logger=None):
+def launch_power_monitor(queue, log_dir, initial_info, logger=None, clearml_log=False):
     """
     Launches a separate process which monitors metrics
 
@@ -143,9 +146,11 @@ def launch_power_monitor(queue, log_dir, initial_info, logger=None):
     :param log_dir: The log directory to use
     :param initial_info: Any initial information that was gathered before the thread was launched.
     :param logger: A logger to use
+    :param clearml_log: Activate or deactivate ClearML Logging.
     :return:
     """
     logger.info("Starting process to monitor power")
+    step = 0
     while True:
         try:
             message = queue.get(block=False)
@@ -158,7 +163,15 @@ def launch_power_monitor(queue, log_dir, initial_info, logger=None):
             pass
 
         try:
-            _sample_and_log_power(log_dir, initial_info, logger=logger)
+            info_dict =_sample_and_log_power(log_dir, initial_info, logger=logger)
+            if clearml_log:
+                try:
+                    step += 1
+                    log_info_clearml(info_dict, step)
+                except Exception as e:
+                    print(e)
+
+
         except:
             ex_type, ex_value, tb = sys.exc_info()
             logger.error("Encountered exception within power monitor thread!")
@@ -237,15 +250,73 @@ def gather_initial_info(log_dir: str):
 
     return data
 
+def log_info_clearml(info_dict, step):
+    """
+    Logs metrics to ClearML Experiment Manager. The logged scalar can be found in ClearML WebUI under 'Scalars' section.
+    :param info_dict: Collected data/returned data dictonary from function '_sample_and_log_power'.
+    :param step: Iteration number.
+    :return:
+    """
+    try:
+        from clearml import Logger
+        clearml_logger = Logger.current_logger()
+        # Report Scalars to ClearML
+        clearml_logger.report_scalar(
+                    title="Experiment Impact Tracker Log",
+                    value=info_dict["rapl_power_draw_absolute"],
+                    series="rapl_power_draw_absolute",
+                    iteration=step
+                )
+        clearml_logger.report_scalar(
+                    title="Experiment Impact Tracker Log",
+                    value=info_dict["rapl_estimated_attributable_power_draw"],
+                    series="rapl_estimated_attributable_power_draw",
+                    iteration=step
+                )
+        clearml_logger.report_scalar(
+                    title="Experiment Impact Tracker Log",
+                    value=info_dict["average_relative_cpu_utilization"],
+                    series="average_relative_cpu_utilization",
+                    iteration=step
+                )
+        clearml_logger.report_scalar(
+                    title="Experiment Impact Tracker Log",
+                    value=info_dict["absolute_cpu_utilization"],
+                    series="absolute_cpu_utilization",
+                    iteration=step
+                )
+        clearml_logger.report_scalar(
+                    title="Absolute Memory Usage",
+                    value=info_dict["absolute_mem_usage"],
+                    series="absolute_mem_usage",
+                    iteration=step
+                )
+        clearml_logger.report_scalar(
+                    title="Experiment Impact Tracker Log",
+                    value=info_dict["absolute_mem_percent_usage"],
+                    series="absolute_mem_percent_usage",
+                    iteration=step
+                )
+
+    except Exception as exception:
+        print(exception)
+
 
 class ImpactTracker(object):
-    def __init__(self, logdir):
+    def __init__(self, logdir, clearml_log=False, project_name="Experiment Impact Tracker", task_name="Example Experiment"):
         self.logdir = logdir
         self._setup_logging()
         self.logger.info("Gathering system info for reproducibility...")
         self.initial_info = gather_initial_info(logdir)
         self.logger.info("Done initial setup and information gathering...")
         self.launched = False
+        self.clearml_log = clearml_log
+        if self.clearml_log:
+            try:
+                from clearml import Task
+                self.clearml_task = Task.init(project_name=project_name, task_name=task_name, reuse_last_task_id=False)
+            except ModuleNotFoundError:
+                print("Run 'pip install clearml' ")
 
     def _setup_logging(self):
         """
@@ -290,9 +361,10 @@ class ImpactTracker(object):
         try:
             # the defaults for multiprocessing changed in python 3.8.
             # OS X multiprocessing starts processes with spawn instead of fork
-            multiprocessing.set_start_method("fork")
+            if platform == 'darwin':
+                multiprocessing.set_start_method("fork")
             self.p, self.queue = launch_power_monitor(
-                self.logdir, self.initial_info, self.logger
+                self.logdir, self.initial_info, self.logger, self.clearml_log
             )
 
             def _terminate_monitor_and_log_final_info(p):
@@ -300,6 +372,9 @@ class ImpactTracker(object):
                 log_final_info(self.logdir)
 
             atexit.register(_terminate_monitor_and_log_final_info, self.p)
+            if self.clearml_log:
+                self.clearml_task.upload_artifact('Impact Tracker', artifact_object=self.logdir)
+
             self.launched = True
         except:
             ex_type, ex_value, tb = sys.exc_info()
@@ -316,6 +391,7 @@ class ImpactTracker(object):
 
         :return: latest stats
         """
+
         try:
             message = self.queue.get(block=False)
             if isinstance(message, tuple):
